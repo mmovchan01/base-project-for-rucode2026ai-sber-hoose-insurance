@@ -12,6 +12,8 @@ import sys
 import argparse
 import warnings
 warnings.filterwarnings('ignore')
+# keep the diagnostics emitted by our own model code visible
+warnings.filterwarnings('default', category=RuntimeWarning, module=r'src\.models')
 import pandas as pd
 import numpy as np
 
@@ -49,6 +51,10 @@ def main():
     output_path = args.output if args.output else f"submission_seed_{seed}.csv"
     threshold = args.threshold if args.threshold is not None else ensemble.optimal_threshold
     
+    scoring = ensemble.xgb_scoring_strategy
+    if scoring != 'native':
+        print(f"Note: XGBoost is scored through the '{scoring}' path "
+              f"(stale/corrupted category container in '{args.model_dir}/').")
     print(f"Model trained with Seed: {seed}")
     print(f"Optimal decision threshold: {threshold:.4f}")
     print(f"Loading test data from '{args.test_data}'...")
