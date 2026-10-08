@@ -1,0 +1,187 @@
+{
+  "n_splits": 5,
+  "seed": 42,
+  "weights": {
+    "catboost_d6": 0.4,
+    "catboost_d5": 0.3,
+    "lightgbm": 0.15,
+    "xgboost": 0.15
+  },
+  "feature_names": [
+    "age",
+    "gender",
+    "region",
+    "city_population",
+    "family_status",
+    "children",
+    "education",
+    "employment_type",
+    "monthly_income",
+    "owns_car",
+    "owns_house",
+    "years_with_bank",
+    "number_of_bank_products",
+    "average_monthly_balance",
+    "has_credit",
+    "loan_amount",
+    "credit_score",
+    "number_of_card_transactions_month",
+    "online_payments_share",
+    "mobile_app_usage",
+    "smartphone_brand",
+    "smartphone_price",
+    "smartphone_age_months",
+    "marketing_contacts_last_year",
+    "previous_campaign_response",
+    "previous_insurance",
+    "insurance_claims",
+    "has_loan_amount",
+    "has_credit_score",
+    "has_mobile_app",
+    "has_insurance_claims",
+    "loan_amount_filled",
+    "insurance_claims_filled",
+    "mobile_app_usage_filled",
+    "credit_score_filled",
+    "price_to_income",
+    "balance_to_income",
+    "loan_to_income",
+    "income_per_child",
+    "net_liquid_wealth",
+    "total_annual_liquidity",
+    "phone_affordability_index",
+    "price_per_month_age",
+    "estimated_current_value",
+    "is_apple",
+    "is_samsung",
+    "is_xiaomi",
+    "is_flagship",
+    "is_budget",
+    "is_new_phone",
+    "is_old_phone",
+    "digital_intensity",
+    "online_tx_count",
+    "offline_tx_count",
+    "digital_native_score",
+    "card_tx_daily",
+    "products_per_year",
+    "balance_per_product",
+    "credit_to_balance",
+    "bank_relationship_score",
+    "claims_per_insurance",
+    "had_claims",
+    "campaign_and_insurance",
+    "marketing_responsiveness",
+    "insurance_propensity",
+    "is_capital",
+    "is_young",
+    "is_senior",
+    "brand_mean_price",
+    "brand_std_price",
+    "price_to_brand_mean",
+    "price_diff_brand_mean",
+    "region_mean_income",
+    "region_std_income",
+    "income_to_region_mean",
+    "phone_to_region_income",
+    "log_income",
+    "log_balance",
+    "log_price",
+    "log_population",
+    "log_loan"
+  ],
+  "optimal_threshold": 0.42,
+  "cv_metrics": {
+    "catboost_d6": {
+      "threshold": 0.445,
+      "roc_auc": 0.99253,
+      "f1_score": 0.95318,
+      "accuracy": 0.96917,
+      "precision": 0.95101,
+      "recall": 0.95535,
+      "confusion_matrix": [
+        [
+          3932,
+          97
+        ],
+        [
+          88,
+          1883
+        ]
+      ]
+    },
+    "catboost_d5": {
+      "threshold": 0.46,
+      "roc_auc": 0.99239,
+      "f1_score": 0.95354,
+      "accuracy": 0.9695,
+      "precision": 0.95427,
+      "recall": 0.95282,
+      "confusion_matrix": [
+        [
+          3939,
+          90
+        ],
+        [
+          93,
+          1878
+        ]
+      ]
+    },
+    "lightgbm": {
+      "threshold": 0.47,
+      "roc_auc": 0.99133,
+      "f1_score": 0.94595,
+      "accuracy": 0.96467,
+      "precision": 0.95079,
+      "recall": 0.94115,
+      "confusion_matrix": [
+        [
+          3933,
+          96
+        ],
+        [
+          116,
+          1855
+        ]
+      ]
+    },
+    "xgboost": {
+      "threshold": 0.44,
+      "roc_auc": 0.99174,
+      "f1_score": 0.94939,
+      "accuracy": 0.96667,
+      "precision": 0.947,
+      "recall": 0.9518,
+      "confusion_matrix": [
+        [
+          3924,
+          105
+        ],
+        [
+          95,
+          1876
+        ]
+      ]
+    },
+    "ensemble": {
+      "threshold": 0.42,
+      "roc_auc": 0.99244,
+      "f1_score": 0.95315,
+      "accuracy": 0.969,
+      "precision": 0.94647,
+      "recall": 0.95992,
+      "confusion_matrix": [
+        [
+          3922,
+          107
+        ],
+        [
+          79,
+          1892
+        ]
+      ]
+    },
+    "optimal_threshold": 0.42
+  }
+}
