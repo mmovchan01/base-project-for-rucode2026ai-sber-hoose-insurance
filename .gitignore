@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# временные каталоги самопроверки
+._verify_tmp/
+
+# логи и кэши экспериментов
+explore/*.log
+explore/__pycache__/
+*.npy
+*.npz
+
+# ОС
+.DS_Store
+
+# артефакты CatBoost
+catboost_info/

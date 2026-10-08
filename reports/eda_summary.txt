@@ -1,0 +1,208 @@
+==============================================================================
+1. ОБЩАЯ СТРУКТУРА ДАННЫХ
+==============================================================================
+train: (6000, 29), public_test: (1000, 28)
+customer_id: train C100000..C105999 | test C106000..C106999
+дубликаты customer_id в train: 0
+полные дубликаты строк в train: 0
+целевая переменная: доля 1 = 0.3285  (1971 из 6000) -> дисбаланс умеренный (1 : 2.04)
+
+==============================================================================
+2. ПРОПУСКИ
+==============================================================================
+                  train_%  test_%
+loan_amount         40.97    41.9
+credit_score         8.05     8.1
+mobile_app_usage     2.65     1.2
+insurance_claims    52.50    53.4
+
+Структурные пропуски (закономерные, а не случайные):
+  loan_amount NaN <=> has_credit == 0 : True
+  insurance_claims NaN <=> previous_insurance == 0 : True
+  => эти пропуски не несут новой информации (индикатор = сам флаг).
+Неструктурные пропуски (MNAR - пропуск сам по себе информативен):
+  credit_score: target rate | есть = 0.3399 (n=5517) | пропуск = 0.1988 (n=483)
+  mobile_app_usage: target rate | есть = 0.3318 (n=5841) | пропуск = 0.2075 (n=159)
+
+==============================================================================
+3. ВЫБРОСЫ И ДИАПАЗОНЫ
+==============================================================================
+  age                              [       18.00 ..        72.00]  spec OK             extreme-outliers: 0
+  children                         [        0.00 ..         5.00]  spec OK             extreme-outliers: 0
+  monthly_income                   [    10000.00 ..    417589.00]  spec OK             extreme-outliers: 65
+  years_with_bank                  [        0.00 ..        28.00]  spec OK             extreme-outliers: 15
+  number_of_bank_products          [        1.00 ..         8.00]  spec OK             extreme-outliers: 0
+  credit_score                     [      352.00 ..       850.00]  spec OK             extreme-outliers: 0
+  number_of_card_transactions_month [        2.00 ..        72.00]  spec OK             extreme-outliers: 0
+  online_payments_share            [        0.01 ..         1.00]  spec OK             extreme-outliers: 0
+  smartphone_price                 [     3500.00 ..    149412.00]  spec OK             extreme-outliers: 0
+  smartphone_age_months            [        0.00 ..        48.00]  spec OK             extreme-outliers: 0
+  marketing_contacts_last_year     [        0.00 ..        12.00]  spec OK             extreme-outliers: 0
+  Тяжёлые правые хвосты (нужен log): average_monthly_balance, loan_amount, city_population, monthly_income
+
+==============================================================================
+4. СДВИГ РАСПРЕДЕЛЕНИЙ TRAIN -> PUBLIC TEST
+==============================================================================
+                          feature  ks_pvalue
+                  city_population   0.099938
+                      loan_amount   0.173338
+                   monthly_income   0.183900
+            online_payments_share   0.245304
+                     credit_score   0.250041
+number_of_card_transactions_month   0.363923
+                 smartphone_price   0.376917
+                         children   0.521559
+  (p > 0.05 везде => значимого сдвига нет, ковариатного сдвига нет)
+  gender: max |доля_train - доля_test| = 0.0228
+  region: max |доля_train - доля_test| = 0.0320
+  family_status: max |доля_train - доля_test| = 0.0183
+  education: max |доля_train - доля_test| = 0.0062
+  employment_type: max |доля_train - доля_test| = 0.0070
+  smartphone_brand: max |доля_train - доля_test| = 0.0302
+
+==============================================================================
+5. РЕДКИЕ / НЕВИДИМЫЕ КАТЕГОРИИ
+==============================================================================
+  family_status: только в train=['widowed'] только в test=[] редкие(<10)={'widowed': np.int64(1)}
+  employment_type: только в train=['student'] только в test=['retired'] редкие(<10)={'student': np.int64(2)}
+  => обязателен бакет UNSEEN и аккуратное кодирование категорий.
+
+==============================================================================
+6. ЦЕЛЕВАЯ ПЕРЕМЕННАЯ ПО КАТЕГОРИЯМ
+==============================================================================
+
+  gender (базовая доля = 0.329)
+          mean  size
+gender              
+F       0.3344  3179
+M       0.3219  2821
+
+  region (базовая доля = 0.329)
+                   mean  size
+region                       
+Москва           0.5777  1146
+Санкт-Петербург  0.4612   709
+Казань           0.2727   407
+Екатеринбург     0.2500   424
+Новосибирск      0.2459   427
+Самара           0.2429   457
+Уфа              0.2372   371
+Ростов-на-Дону   0.2359   390
+Омск             0.2329   438
+Краснодар        0.2268   366
+Нижний Новгород  0.2252   453
+Челябинск        0.1990   412
+
+  family_status (базовая доля = 0.329)
+                 mean  size
+family_status              
+single         0.3577  3064
+divorced       0.3277   119
+married        0.2969  2816
+widowed        0.0000     1
+
+  education (базовая доля = 0.329)
+             mean  size
+education              
+phd        0.5802    81
+master     0.4673  1115
+bachelor   0.3648  2903
+secondary  0.1810  1901
+
+  employment_type (базовая доля = 0.329)
+                   mean  size
+employment_type              
+self_employed    0.4039   931
+employed         0.3246  4896
+unemployed       0.0351   171
+student          0.0000     2
+
+  smartphone_brand (базовая доля = 0.329)
+                    mean  size
+smartphone_brand              
+Apple             0.8104  1097
+Google            0.5217   138
+Samsung           0.4550  1367
+OnePlus           0.3529   136
+Huawei            0.1459   658
+Xiaomi            0.1191  1931
+Other             0.0208   673
+  owns_car: {0: 0.2137, 1: 0.4741}
+  owns_house: {0: 0.2552, 1: 0.4391}
+  has_credit: {0: 0.2526, 1: 0.3811}
+  previous_campaign_response: {0: 0.2305, 1: 0.5931}
+  previous_insurance: {0: 0.1429, 1: 0.5337}
+
+==============================================================================
+7. МОНТОТОННОСТЬ ЧИСЛОВЫХ ПРИЗНАКОВ
+==============================================================================
+                          feature  pearson  spearman
+                 smartphone_price   0.7087    0.6930
+                   monthly_income   0.6215    0.6515
+number_of_card_transactions_month   0.5955    0.5988
+                     credit_score   0.5147    0.5192
+          average_monthly_balance   0.3857    0.5180
+                      loan_amount   0.2835    0.3812
+            online_payments_share   0.3433    0.3496
+          number_of_bank_products   0.3542    0.3417
+            smartphone_age_months  -0.3091   -0.3176
+     marketing_contacts_last_year   0.3162    0.3090
+                 mobile_app_usage   0.3066    0.3021
+                  city_population   0.2918    0.2552
+                              age  -0.1388   -0.1098
+                 insurance_claims   0.0624    0.0557
+                  years_with_bank   0.0435    0.0528
+                         children  -0.0457   -0.0457
+
+==============================================================================
+8. КОРРЕЛЯЦИИ МЕЖДУ ПРИЗНАКАМИ (|r| > 0.3)
+==============================================================================
+  monthly_income                     ~ number_of_card_transactions_month  r=+0.763
+  monthly_income                     ~ smartphone_price                   r=+0.727
+  monthly_income                     ~ average_monthly_balance            r=+0.711
+  age                                ~ online_payments_share              r=-0.686
+  number_of_card_transactions_month  ~ online_payments_share              r=+0.663
+  monthly_income                     ~ credit_score                       r=+0.645
+  number_of_card_transactions_month  ~ smartphone_price                   r=+0.603
+  credit_score                       ~ number_of_card_transactions_month  r=+0.576
+  monthly_income                     ~ loan_amount                        r=+0.523
+  age                                ~ children                           r=+0.513
+  credit_score                       ~ smartphone_price                   r=+0.494
+  average_monthly_balance            ~ number_of_card_transactions_month  r=+0.467
+  average_monthly_balance            ~ smartphone_price                   r=+0.464
+  number_of_bank_products            ~ marketing_contacts_last_year       r=+0.435
+  number_of_card_transactions_month  ~ mobile_app_usage                   r=+0.427
+  city_population                    ~ monthly_income                     r=+0.419
+  number_of_bank_products            ~ credit_score                       r=+0.409
+  average_monthly_balance            ~ credit_score                       r=+0.406
+  online_payments_share              ~ mobile_app_usage                   r=+0.401
+  loan_amount                        ~ number_of_card_transactions_month  r=+0.390
+  monthly_income                     ~ marketing_contacts_last_year       r=+0.388
+  average_monthly_balance            ~ loan_amount                        r=+0.385
+  monthly_income                     ~ number_of_bank_products            r=+0.379
+  city_population                    ~ number_of_card_transactions_month  r=+0.377
+  loan_amount                        ~ smartphone_price                   r=+0.364
+  smartphone_price                   ~ smartphone_age_months              r=-0.361
+  monthly_income                     ~ owns_car                           r=+0.354
+  number_of_card_transactions_month  ~ marketing_contacts_last_year       r=+0.353
+  age                                ~ mobile_app_usage                   r=-0.343
+  credit_score                       ~ marketing_contacts_last_year       r=+0.342
+  children                           ~ online_payments_share              r=-0.341
+  number_of_bank_products            ~ number_of_card_transactions_month  r=+0.336
+  monthly_income                     ~ previous_insurance                 r=+0.335
+  age                                ~ number_of_card_transactions_month  r=-0.327
+  city_population                    ~ smartphone_price                   r=+0.319
+  city_population                    ~ average_monthly_balance            r=+0.311
+  monthly_income                     ~ online_payments_share              r=+0.310
+  city_population                    ~ credit_score                       r=+0.301
+  Мультиколлинеарность умеренная; для деревьев не критична.
+
+==============================================================================
+9. КЛЮЧЕВЫЕ ЗАКОНОМЕРНОСТИ (бизнес-интерпретация)
+==============================================================================
+  number_of_card_transactions_month: монотонный рост от 0.004 до 1.000; при значении >= 56 доля покупок = 1.0
+  marketing_contacts_last_year: монотонный рост от 0.115 до 1.000; при значении >= 10 доля покупок = 1.0
+  number_of_bank_products: монотонный рост от 0.147 до 0.938; максимум 0.938 при 8
+  smartphone_brand: Apple 0.810 vs Other 0.021 vs Xiaomi 0.119
+  unemployed: 0.035 (n=171) vs self_employed: 0.404
+  Москва 0.578 vs средний по остальным регионам 0.270
