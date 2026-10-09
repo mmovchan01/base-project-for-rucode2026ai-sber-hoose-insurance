@@ -1,9 +1,10 @@
 import os
 import json
 import pickle
+import warnings
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 from sklearn.model_selection import StratifiedKFold
 from catboost import CatBoostClassifier
 import lightgbm as lgb
@@ -35,10 +36,23 @@ class InsurancePropensityEnsemble:
         self.group_stats: Dict[str, pd.DataFrame] = {}
         self.optimal_threshold: float = 0.5
         self.cv_metrics: Dict[str, Any] = {}
+        # Category levels (one list per CAT_COL) as seen by the models during training.
+        # They are persisted in metadata.json and are what keeps the integer codes of
+        # the tree models stable between training and inference.
+        self.cat_levels: Dict[str, List[str]] = {}
+        # Per-fold levels recovered from the LightGBM twins (used to validate the
+        # category containers that pickled XGBoost boosters carry around).
+        self._fold_cat_levels: List[Dict[str, List[str]]] = []
+        # How XGBoost probabilities are produced: "native" | "codes" | "repaired".
+        self._xgb_strategy: Optional[str] = None
         
     def fit(self, train_df: pd.DataFrame) -> Dict[str, Any]:
         """Train the ensemble on training data with Stratified K-Fold CV."""
         seed_everything(self.seed)
+        # A fresh fit redefines the category levels (and rebuilds every model)
+        self.cat_levels = {}
+        self._fold_cat_levels = []
+        self._xgb_strategy = None
         
         # 1. Feature Engineering
         train_feat, self.group_stats = engineer_features(train_df)
@@ -52,10 +66,10 @@ class InsurancePropensityEnsemble:
         for c in CAT_COLS:
             X_cb[c] = X_cb[c].astype(str)
             
-        X_tree = X.copy()
-        for c in CAT_COLS:
-            X_tree[c] = X_tree[c].astype('category')
-            
+        # Fixed categorical levels -> identical integer codes at train and inference time
+        X_tree = self._aligned_categories(X)
+        self._capture_cat_levels(X_tree)
+        
         skf = StratifiedKFold(n_splits=self.n_splits, shuffle=True, random_state=self.seed)
         
         oof_cb_d6 = np.zeros(len(y))
@@ -178,6 +192,11 @@ class InsurancePropensityEnsemble:
         print(f"Final Ensemble     : F1={ensemble_metrics['f1_score']:.5f}, AUC={ensemble_metrics['roc_auc']:.5f}, Accuracy={ensemble_metrics['accuracy']:.5f}, Precision={ensemble_metrics['precision']:.5f}, Recall={ensemble_metrics['recall']:.5f}")
         print(f"Calibrated Threshold: {self.optimal_threshold}")
         
+        # XGBoost mangles non-ASCII levels in its own category container, so the
+        # freshly fitted boosters may already need the code based scoring path.
+        self._fold_cat_levels = self._recover_fold_cat_levels()
+        self._check_xgb_categories()
+        
         return self.cv_metrics
 
     def predict_proba(self, test_df: pd.DataFrame) -> np.ndarray:
@@ -190,14 +209,14 @@ class InsurancePropensityEnsemble:
         for c in CAT_COLS:
             X_cb[c] = X_cb[c].astype(str)
             
-        X_tree = X.copy()
-        for c in CAT_COLS:
-            X_tree[c] = X_tree[c].astype('category')
+        # Categorical levels are pinned to the training ones, so the integer codes
+        # fed to LightGBM/XGBoost are exactly the codes they were fitted on.
+        X_tree = self._aligned_categories(X)
             
         cb_d6_preds = np.mean([model.predict_proba(X_cb)[:, 1] for model in self.catboost_models], axis=0)
         cb_d5_preds = np.mean([model.predict_proba(X_cb)[:, 1] for model in self.catboost_d5_models], axis=0)
         lgb_preds = np.mean([model.predict_proba(X_tree)[:, 1] for model in self.lightgbm_models], axis=0)
-        xgb_preds = np.mean([model.predict_proba(X_tree)[:, 1] for model in self.xgboost_models], axis=0)
+        xgb_preds = self._predict_xgboost(X_tree)
         
         ensemble_preds = (
             self.weights['catboost_d6'] * cb_d6_preds +
@@ -213,6 +232,235 @@ class InsurancePropensityEnsemble:
             threshold = self.optimal_threshold
         probs = self.predict_proba(test_df)
         return (probs >= threshold).astype(int)
+
+    # ------------------------------------------------------------------
+    # Categorical encoding
+    # ------------------------------------------------------------------
+    def _aligned_categories(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Cast CAT_COLS to the categorical dtype the models were fitted on.
+
+        Deriving the levels from the incoming data (``astype('category')``) is
+        unsafe: a test batch that misses a level - or, as in ``public_test.csv``,
+        brings an extra one (``employment_type == 'retired'``) - shifts every
+        integer code and silently corrupts the XGBoost/LightGBM predictions.
+        Pinning the levels also turns genuinely unknown categories into NaN
+        ("missing") instead of letting XGBoost abort with
+        ``Found a category not in the training set ...``.
+        """
+        X_tree = X.copy()
+        for col in CAT_COLS:
+            if col not in X_tree.columns:
+                continue
+            values = X_tree[col].astype(str)
+            levels = self.cat_levels.get(col)
+            if not levels:
+                X_tree[col] = values.astype('category')
+                continue
+            # Explicit code mapping: unknown levels become -1 (= missing) instead of
+            # raising, and the codes of the known ones stay aligned with training.
+            mapping = {level: code for code, level in enumerate(levels)}
+            codes = values.map(mapping).fillna(-1).to_numpy(dtype=np.int64)
+            X_tree[col] = pd.Categorical.from_codes(codes, categories=list(levels))
+        return X_tree
+
+    def _capture_cat_levels(self, X_tree: pd.DataFrame) -> None:
+        """Remember the training-time category levels (shared by every fold)."""
+        self.cat_levels = {
+            col: list(X_tree[col].cat.categories)
+            for col in CAT_COLS
+            if col in X_tree.columns and hasattr(X_tree[col], 'cat')
+        }
+
+    def _recover_fold_cat_levels(self) -> List[Dict[str, List[str]]]:
+        """Rebuild the training-time levels from the LightGBM twins.
+
+        LightGBM stores ``pandas_categorical`` inside every booster, i.e. the
+        categories of the very same frames XGBoost was fitted on.  This is what
+        lets models saved before ``cat_levels`` was written to metadata.json be
+        served correctly.
+        """
+        cat_cols = self._cat_columns()
+        recovered: List[Dict[str, List[str]]] = []
+        for model in self.lightgbm_models:
+            booster = getattr(model, 'booster_', None)
+            pandas_categorical = getattr(booster, 'pandas_categorical', None)
+            if not pandas_categorical or len(pandas_categorical) != len(cat_cols):
+                recovered.append({})
+            else:
+                recovered.append({
+                    col: [str(v) for v in levels]
+                    for col, levels in zip(cat_cols, pandas_categorical)
+                })
+        return recovered
+
+    def _cat_columns(self) -> List[str]:
+        """Categorical features in the order they appear in the model matrix."""
+        return [c for c in self.feature_names if c in CAT_COLS]
+
+    @property
+    def xgb_scoring_strategy(self) -> str:
+        """XGBoost scoring path in use: 'native', 'codes' or 'repaired'."""
+        return self._xgb_strategy or 'native'
+
+    # ------------------------------------------------------------------
+    # XGBoost prediction (robust against stale category containers)
+    # ------------------------------------------------------------------
+    def _predict_xgboost(self, X_tree: pd.DataFrame) -> np.ndarray:
+        """Blend the XGBoost folds, falling back to safer prediction paths.
+
+        XGBoost stores a corrupted category container whenever the levels are
+        not ASCII (here the Cyrillic ``region`` values come back as
+        ``'Екатер' + 'инб' + ...`` - reproduced with XGBoost 3.2.0, and pickles
+        written by older releases show the same damage).  Recent XGBoost
+        validates the incoming categories against that container and raises
+        ``Found a category not in the training set ...`` even for perfectly
+        valid rows, so those boosters have to be scored through a path that
+        does not consult the container:
+
+        * ``native``   - the regular ``predict_proba`` call;
+        * ``codes``    - the matrix of (aligned) category codes is passed as a
+                         plain numpy array, which XGBoost consumes without any
+                         categorical validation.  The trees split on those very
+                         codes, so the result is identical;
+        * ``repaired`` - the booster is reloaded from its own model dump, which
+                         drops the stale container.
+        """
+        strategies = ('native', 'codes', 'repaired')
+        if self._xgb_strategy in strategies:
+            strategies = (self._xgb_strategy,) + tuple(s for s in strategies if s != self._xgb_strategy)
+
+        X_num = None
+        fold_preds = []
+        for model in self.xgboost_models:
+            last_error: Optional[Exception] = None
+            for strategy in strategies:
+                try:
+                    if strategy == 'native':
+                        preds = model.predict_proba(X_tree)[:, 1]
+                    else:
+                        if strategy == 'codes':
+                            if X_num is None:
+                                X_num = self._category_codes_matrix(X_tree)
+                            preds = self._xgb_predict_codes(model, X_num)
+                        else:
+                            preds = self._xgb_predict_repaired(model, X_tree)
+                    if strategy != self._xgb_strategy:
+                        if strategy != 'native':
+                            warnings.warn(
+                                "XGBoost models could not be scored through the regular "
+                                f"path ({last_error.__class__.__name__}: {last_error}); "
+                                f"using the '{strategy}' fallback instead.",
+                                RuntimeWarning,
+                            )
+                        self._xgb_strategy = strategy
+                    break
+                except Exception as exc:  # noqa: BLE001 - try the next strategy
+                    last_error = exc
+            else:
+                raise RuntimeError(
+                    "XGBoost scoring failed for every available prediction path "
+                    f"({', '.join(strategies)}). Last error: {last_error}"
+                ) from last_error
+            fold_preds.append(preds)
+
+        return np.mean(fold_preds, axis=0)
+
+    def _category_codes_matrix(self, X_tree: pd.DataFrame) -> np.ndarray:
+        """Numeric matrix whose categorical columns hold the training-code values."""
+        X_num = X_tree.copy()
+        for col in CAT_COLS:
+            if col in X_num.columns and isinstance(X_num[col].dtype, pd.CategoricalDtype):
+                codes = X_num[col].cat.codes.to_numpy(dtype=np.float64)
+                codes[codes < 0] = np.nan  # unknown category -> missing
+                X_num[col] = codes
+        return X_num.to_numpy(dtype=np.float64)
+
+    @staticmethod
+    def _xgb_iteration_range(model) -> Tuple[int, int]:
+        """Mirror the iteration range scikit-learn's ``predict`` would use."""
+        try:
+            return (0, int(model.get_booster().best_iteration) + 1)
+        except Exception:  # noqa: BLE001 - no early stopping -> use all trees
+            return (0, 0)
+
+    def _xgb_predict_codes(self, model, X_num: np.ndarray) -> np.ndarray:
+        booster = model.get_booster()
+        return booster.inplace_predict(
+            X_num,
+            iteration_range=self._xgb_iteration_range(model),
+            predict_type='value',
+            missing=getattr(model, 'missing', np.nan),
+        )
+
+    def _xgb_predict_repaired(self, model, X_tree: pd.DataFrame) -> np.ndarray:
+        booster = model.get_booster()
+        fresh = xgb.Booster()
+        fresh.load_model(bytearray(booster.save_raw('json')))
+        preds = fresh.inplace_predict(
+            X_tree,
+            iteration_range=self._xgb_iteration_range(model),
+            predict_type='value',
+            missing=getattr(model, 'missing', np.nan),
+        )
+        model._Booster = fresh
+        return preds
+
+    def _xgb_categories_are_stale(self, model, expected: Dict[str, List[str]]) -> bool:
+        """True when a booster's stored category container cannot be trusted.
+
+        XGBoost mangles non-ASCII levels when it builds that container
+        (``region`` comes back as ``'Екатер' + 'инб' + ...``), so any container
+        that disagrees with the LightGBM twins - which were fitted on the very
+        same frames - is unusable.
+        """
+        booster = model.get_booster()
+        getter = getattr(booster, 'get_categories', None)
+        if getter is None:
+            return False  # XGBoost < 3.1 stores no container at all
+        try:
+            cats = getter(export_to_arrow=True)
+            empty = cats.empty
+            if empty() if callable(empty) else empty:
+                return False
+            table = list(cats.to_arrow())
+        except Exception:  # noqa: BLE001 - container not inspectable here
+            return False
+
+        for col, levels in expected.items():
+            if col not in self.feature_names:
+                continue
+            stored = table[self.feature_names.index(col)][1]
+            if stored is None:
+                continue
+            try:
+                stored_levels = [value.as_py() for value in stored]
+            except Exception:  # noqa: BLE001 - broken UTF-8 payload
+                return True
+            if stored_levels != [str(level) for level in levels]:
+                return True
+        return False
+
+    def _check_xgb_categories(self) -> None:
+        """Warn (and switch strategy) when pickled containers are unusable."""
+        for fold, model in enumerate(self.xgboost_models):
+            expected = (
+                self._fold_cat_levels[fold]
+                if fold < len(self._fold_cat_levels) and self._fold_cat_levels[fold]
+                else self.cat_levels
+            )
+            if not expected:
+                continue
+            if self._xgb_categories_are_stale(model, expected):
+                self._xgb_strategy = 'codes'
+                warnings.warn(
+                    "The XGBoost boosters carry a corrupted categorical container "
+                    "(XGBoost mangles non-ASCII levels such as the Cyrillic `region` "
+                    "values). Scoring them through the category-code path, which "
+                    "reproduces the training-time encoding exactly and avoids the "
+                    "'Found a category not in the training set' error.",
+                    RuntimeWarning,
+                )
+                return
 
     def save(self, model_dir: str = 'models') -> None:
         """Save all ensemble weights and metadata to disk."""
@@ -239,7 +487,8 @@ class InsurancePropensityEnsemble:
             'weights': self.weights,
             'feature_names': self.feature_names,
             'optimal_threshold': self.optimal_threshold,
-            'cv_metrics': self.cv_metrics
+            'cv_metrics': self.cv_metrics,
+            'cat_levels': self.cat_levels
         }
         with open(os.path.join(model_dir, 'metadata.json'), 'w') as f:
             json.dump(meta, f, indent=2)
@@ -257,6 +506,9 @@ class InsurancePropensityEnsemble:
         instance.feature_names = meta['feature_names']
         instance.optimal_threshold = meta['optimal_threshold']
         instance.cv_metrics = meta['cv_metrics']
+        # Category levels as seen during training. Models saved before they were
+        # persisted get them back from the LightGBM twins below.
+        instance.cat_levels = meta.get('cat_levels') or {}
         
         with open(os.path.join(model_dir, 'catboost_d6_models.pkl'), 'rb') as f:
             instance.catboost_models = pickle.load(f)
@@ -269,4 +521,13 @@ class InsurancePropensityEnsemble:
         with open(os.path.join(model_dir, 'group_stats.pkl'), 'rb') as f:
             instance.group_stats = pickle.load(f)
             
+        # Restore the training-time category levels for models saved without them
+        instance._fold_cat_levels = instance._recover_fold_cat_levels()
+        if not instance.cat_levels:
+            for fold_levels in instance._fold_cat_levels:
+                if fold_levels:
+                    instance.cat_levels = fold_levels
+                    break
+        instance._check_xgb_categories()
+        
         return instance
